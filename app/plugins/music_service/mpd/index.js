@@ -626,12 +626,14 @@ ControllerMpd.prototype.onVolumioStart = function () {
  * Install a systemd drop-in so mpd.service restarts after crash/OOM, with
  * StartLimitBurst to avoid a tight death loop. Source of truth lives in-repo
  * under systemd/oom-restart.conf (pulled onto the device with /volumio).
+ *
+ * Uses only NOPASSWD sudo helpers available on Volumio images (tar, tee,
+ * systemctl) — not mkdir — so a plain pull+vrestart works without OEM SSH.
  */
 ControllerMpd.prototype.ensureMpdRestartPolicy = function () {
   var self = this;
   var src = __dirname + '/systemd/oom-restart.conf';
-  var destDir = '/etc/systemd/system/mpd.service.d';
-  var dest = destDir + '/volumio-oom-restart.conf';
+  var dest = '/etc/systemd/system/mpd.service.d/volumio-oom-restart.conf';
   var execOpts = {uid: 1000, gid: 1000, encoding: 'utf8'};
 
   try {
@@ -642,20 +644,20 @@ ControllerMpd.prototype.ensureMpdRestartPolicy = function () {
     var desired = fs.readFileSync(src, 'utf8');
     var current = '';
     try {
-      current = execSync('/usr/bin/sudo /bin/cat ' + dest, execOpts);
+      current = fs.readFileSync(dest, 'utf8');
     } catch (readErr) {
       current = '';
     }
     if (current === desired) {
       return;
     }
-    execSync('/usr/bin/sudo /bin/mkdir -p ' + destDir, execOpts);
-    execSync('/usr/bin/sudo /usr/bin/tee ' + dest + ' > /dev/null', {
-      uid: 1000,
-      gid: 1000,
-      encoding: 'utf8',
-      input: desired
-    });
+
+    var staging = os.tmpdir() + '/volumio-mpd-oom-restart';
+    libFsExtra.removeSync(staging);
+    libFsExtra.mkdirsSync(staging + '/mpd.service.d');
+    fs.writeFileSync(staging + '/mpd.service.d/volumio-oom-restart.conf', desired);
+    // Create parent dir + file under /etc/systemd/system via tar (NOPASSWD).
+    execSync('/bin/tar -C ' + staging + ' -cf - mpd.service.d | /usr/bin/sudo /bin/tar -C /etc/systemd/system -xf -', execOpts);
     execSync('/usr/bin/sudo /bin/systemctl daemon-reload', execOpts);
     self.logger.info('Installed MPD systemd restart policy (Restart=on-failure, rate-limited)');
   } catch (e) {
