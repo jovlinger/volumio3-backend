@@ -616,8 +616,51 @@ ControllerMpd.prototype.onVolumioStart = function () {
   self.loadLibrarySettings();
   dsd_autovolume = self.config.get('dsd_autovolume', false);
   self.getPlaybackMode();
+  // Idempotent: drop-in under /etc so OOM-killed mpd comes back without OEM SSH.
+  self.ensureMpdRestartPolicy();
 
   return libQ.resolve();
+};
+
+/**
+ * Install a systemd drop-in so mpd.service restarts after crash/OOM, with
+ * StartLimitBurst to avoid a tight death loop. Source of truth lives in-repo
+ * under systemd/oom-restart.conf (pulled onto the device with /volumio).
+ */
+ControllerMpd.prototype.ensureMpdRestartPolicy = function () {
+  var self = this;
+  var src = __dirname + '/systemd/oom-restart.conf';
+  var destDir = '/etc/systemd/system/mpd.service.d';
+  var dest = destDir + '/volumio-oom-restart.conf';
+  var execOpts = {uid: 1000, gid: 1000, encoding: 'utf8'};
+
+  try {
+    if (!fs.existsSync(src)) {
+      self.logger.error('MPD restart policy source missing: ' + src);
+      return;
+    }
+    var desired = fs.readFileSync(src, 'utf8');
+    var current = '';
+    try {
+      current = execSync('/usr/bin/sudo /bin/cat ' + dest, execOpts);
+    } catch (readErr) {
+      current = '';
+    }
+    if (current === desired) {
+      return;
+    }
+    execSync('/usr/bin/sudo /bin/mkdir -p ' + destDir, execOpts);
+    execSync('/usr/bin/sudo /usr/bin/tee ' + dest + ' > /dev/null', {
+      uid: 1000,
+      gid: 1000,
+      encoding: 'utf8',
+      input: desired
+    });
+    execSync('/usr/bin/sudo /bin/systemctl daemon-reload', execOpts);
+    self.logger.info('Installed MPD systemd restart policy (Restart=on-failure, rate-limited)');
+  } catch (e) {
+    self.logger.error('Cannot install MPD restart policy: ' + e);
+  }
 };
 
 ControllerMpd.prototype.onStart = function () {
